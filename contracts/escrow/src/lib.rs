@@ -96,39 +96,6 @@ pub enum DataKey {
     Disputes,
 }
 
-/// Deposit record (schema v2).
-///
-/// v1 records carried the same fields minus `fee_bps`; [`EscrowContract::migrate`]
-/// widens stored entries in place and defaults the fee to `0`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EscrowDeposit {
-    pub depositor: Address,
-    pub amount: i128,
-    pub bridge_address: Address,
-    pub timestamp: u64,
-    pub timeout_ledger: u32,
-    pub released: bool,
-    pub refunded: bool,
-    pub fee_bps: u32,
-}
-
-/// Deposit record as written by schema v1 (no `fee_bps`).
-///
-/// Retained purely so [`EscrowContract::migrate`] can decode entries written by an
-/// older build; current code never writes this shape.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EscrowDepositV1 {
-    pub depositor: Address,
-    pub amount: i128,
-    pub bridge_address: Address,
-    pub timestamp: u64,
-    pub timeout_ledger: u32,
-    pub released: bool,
-    pub refunded: bool,
-}
-
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EscrowStatus {
@@ -139,6 +106,10 @@ pub enum EscrowStatus {
     Cancelled,
 }
 
+/// Deposit record (schema v2).
+///
+/// v1 records carried `released`/`refunded` flags and no `fee_bps`;
+/// [`EscrowContract::migrate`] maps those flags onto `status` and defaults the fee to `0`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowDeposit {
@@ -151,6 +122,9 @@ pub struct EscrowDeposit {
     pub fee_bps: u32,
 }
 
+/// Deposit record as written by schema v1 (no `fee_bps`, `released`/`refunded` flags).
+///
+/// Retained so [`EscrowContract::migrate`] can decode entries from an older build.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowDepositV1 {
@@ -228,14 +202,6 @@ impl EscrowContract {
         release::load_deposits(&env)?
             .get(deposit_id)
             .ok_or(ContractError::NotFound)
-    }
-
-    /// The stored schema version.
-    pub fn schema_version(env: Env) -> Result<u32, ContractError> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Schema)
-            .ok_or(ContractError::NotInitialized)
     }
 
     /// Update the refund timeout applied to *future* deposits. Authority only.

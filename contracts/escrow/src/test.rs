@@ -9,7 +9,6 @@ use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
     Address, IntoVal, Vec,
 };
-use stellar_spend_shared::events::topics;
 use stellar_spend_shared::errors::ContractError;
 
 use crate::test_utils::{assert_fresh_init_is_current, EscrowTest, START_LEDGER};
@@ -247,6 +246,17 @@ fn refund_succeeds_after_timeout_for_depositor() {
     }]);
 
     assert!(t.client().try_refund(&id).is_err(), "refund must be rejected");
+
+    // With the depositor's own authorisation the same refund goes through.
+    t.env.mock_auths(&[MockAuth {
+        address: &t.depositor,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "refund",
+            args: Vec::from_array(&t.env, [id.into_val(&t.env)]),
+            sub_invokes: &[],
+        },
+    }]);
     assert_eq!(t.client().try_refund(&id), Ok(Ok(400)));
 }
 
@@ -349,7 +359,7 @@ fn init_emits_event_with_settlement_authority() {
     t.client().init(&t.admin);
 
     // The init event is the only event emitted by this call.
-    // Topic: (adminini, v1)   Data: (settlement_authority, timestamp)
+    // Topic: (init,)   Data: settlement_authority
     let events = t.env.events().all();
     assert_eq!(events.len(), 1);
     let event = events.get(0).unwrap();
@@ -357,8 +367,8 @@ fn init_emits_event_with_settlement_authority() {
         event,
         &t.contract_id,
         &t.env,
-        topics::ADMIN_INIT,
-        (t.admin.clone(), t.env.ledger().timestamp()),
+        symbol_short!("init"),
+        t.admin.clone(),
     );
 }
 
