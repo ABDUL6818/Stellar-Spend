@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useBackgroundSync } from '@/lib/background-sync';
+import { CHROME_TOKENS } from '@/lib/theme-tokens';
 
 /**
  * Shows a degraded-mode banner while offline and automatically retries
@@ -56,7 +57,12 @@ export default function OfflineBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="sticky top-0 z-50 flex items-center justify-center gap-2 px-4 py-2 text-[11px] font-semibold tracking-widest uppercase bg-[#1a1a1a] border-b border-[#333333] text-[#c9a962]"
+      className="sticky top-0 z-50 flex items-center justify-center gap-2 px-4 py-2 text-[11px] font-semibold tracking-widest uppercase border-b"
+      style={{
+        backgroundColor: CHROME_TOKENS.surfaceElevated,
+        borderColor: CHROME_TOKENS.border,
+        color: CHROME_TOKENS.gold,
+      }}
     >
       {isOffline ? (
         <>
