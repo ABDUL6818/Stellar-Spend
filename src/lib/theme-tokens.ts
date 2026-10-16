@@ -44,6 +44,21 @@ export const LIGHT_TOKENS: ThemeTokens = {
   info: '#1d4ed8',
 };
 
+/**
+ * Chrome palette used by the app shell (offline banner, install prompt,
+ * update prompt). Lives here so those components never hard-code hex values.
+ */
+export const CHROME_TOKENS = {
+  surface: '#111111',
+  surfaceElevated: '#1a1a1a',
+  border: '#333333',
+  borderMuted: '#555555',
+  gold: '#c9a962',
+  goldHover: '#d4b982',
+  textDim: '#999999',
+  textFaint: '#666666',
+} as const;
+
 export const HIGH_CONTRAST_TOKENS: ThemeTokens = {
   bg: '#000000',
   panel: '#000000',
