@@ -6,10 +6,10 @@ import {
   QueueBackpressureError,
   DEFAULT_MAX_QUEUE_DEPTH,
   DEFAULT_MAX_INFLIGHT,
-} from './queue-backpressure';
+} from './priority-queue';
 import { TransactionPriority, TransactionPriorityQueue } from './priority-queue';
 
-describe('queue-backpressure', () => {
+describe('priority-queue backpressure', () => {
   const originalDepthEnv = process.env.QUEUE_MAX_DEPTH;
   const originalInflightEnv = process.env.QUEUE_MAX_INFLIGHT;
 

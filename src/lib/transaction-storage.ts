@@ -52,6 +52,37 @@ export interface Transaction {
   };
 }
 
+/**
+ * Shared localStorage persistence helpers. Every browser-side store in the
+ * app (transactions, sync settings, sync metadata, sync queue) goes through
+ * these so SSR guards and JSON error handling live in one place.
+ */
+export function readStoredJson<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? (JSON.parse(stored) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Returns false when the write fails (e.g. quota exceeded or no window). */
+export function writeStoredJson(key: string, value: unknown): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removeStoredItem(key: string): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem(key);
+}
+
 const STORAGE_KEY = 'stellar_spend_transactions';
 const MAX_TRANSACTIONS = 50;
 
