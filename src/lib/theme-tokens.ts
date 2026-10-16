@@ -61,3 +61,57 @@ export const HIGH_CONTRAST_TOKENS: ThemeTokens = {
   error: '#ff6060',
   info: '#00ffff',
 };
+
+// ---------------------------------------------------------------------------
+// Status variants
+// ---------------------------------------------------------------------------
+
+/** Semantic color roles shared by transaction badges and status-page indicators. */
+export type StatusVariant = 'success' | 'warning' | 'danger' | 'info' | 'accent' | 'neutral' | 'special';
+
+/** Container classes for each variant (border, background and text). */
+export const STATUS_VARIANT_CLASSES: Record<StatusVariant, string> = {
+  success: 'bg-green-500/10 border border-green-500/40 text-green-400',
+  warning: 'bg-yellow-500/10 border border-yellow-500/40 text-yellow-400',
+  danger: 'bg-red-500/10 border border-red-500/40 text-red-400',
+  info: 'bg-blue-500/10 border border-blue-500/40 text-blue-400',
+  accent: 'bg-[#c9a962]/15 border border-[#c9a962]/60 text-[#c9a962]',
+  neutral: 'bg-[#333333]/40 border border-[#333333] text-[#777777]',
+  special: 'bg-purple-500/10 border border-purple-500/40 text-purple-400',
+};
+
+/** Indicator dot classes for each variant. */
+export const STATUS_VARIANT_DOT_CLASSES: Record<StatusVariant, string> = {
+  success: 'bg-green-500',
+  warning: 'bg-yellow-400',
+  danger: 'bg-red-500',
+  info: 'bg-blue-400',
+  accent: 'bg-[#c9a962]',
+  neutral: 'bg-[#555555]',
+  special: 'bg-purple-500',
+};
+
+/** The single status-to-variant map. Covers transaction and component/corridor statuses. */
+export const STATUS_VARIANTS: Record<string, StatusVariant> = {
+  // Offramp row and step statuses
+  SETTLING: 'accent',
+  COMPLETE: 'success',
+  idle: 'neutral',
+  initiating: 'info',
+  'awaiting-signature': 'warning',
+  submitting: 'info',
+  processing: 'accent',
+  settling: 'accent',
+  success: 'success',
+  error: 'danger',
+  // Stored transaction statuses
+  pending: 'warning',
+  completed: 'success',
+  failed: 'danger',
+  reversed: 'special',
+  partially_reversed: 'special',
+  // Status page component and corridor health
+  operational: 'success',
+  degraded: 'warning',
+  down: 'danger',
+};
