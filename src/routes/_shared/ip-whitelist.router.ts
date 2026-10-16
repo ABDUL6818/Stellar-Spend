@@ -6,6 +6,7 @@
  * `lib/ip-whitelist.ts`; this file is the HTTP layer.
  */
 import { Router, Request, Response, NextFunction } from 'express';
+import { logger } from '../../lib/logger';
 import {
   listEntries,
   getEntry,
@@ -57,8 +58,7 @@ function handleError(err: unknown, res: Response) {
   if (err instanceof IpWhitelistError) {
     return res.status(err.status).json({ error: err.code, message: err.message });
   }
-  // eslint-disable-next-line no-console -- server-side error logging
-  console.error('ip-whitelist error:', err);
+  logger.error('ip_whitelist.error', {}, err);
   return res.status(500).json({ error: 'internal_error' });
 }
 
