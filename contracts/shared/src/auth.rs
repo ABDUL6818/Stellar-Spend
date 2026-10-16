@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol, Vec};
+use soroban_sdk::{Address, Env, IntoVal, Symbol, Val, Vec};
 
 use crate::errors::ContractError;
 
@@ -125,4 +125,21 @@ mod tests {
             }
         }
     }
+}
+
+/// Return the administrator recorded under `key` in instance storage, requiring
+/// that administrator to have authorised the current invocation.
+///
+/// Reports [`ContractError::NotInitialized`] when no administrator is recorded.
+pub fn require_admin<K>(env: &Env, key: &K) -> Result<Address, ContractError>
+where
+    K: IntoVal<Env, Val>,
+{
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(key)
+        .ok_or(ContractError::NotInitialized)?;
+    admin.require_auth();
+    Ok(admin)
 }

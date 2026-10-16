@@ -97,7 +97,7 @@ impl Admin {
         storage.set(&DataKey::Paused, &false);
         storage.set(&DataKey::DefaultRate, &default_fee_bp);
         storage.set(&DataKey::Schema, &SCHEMA_VERSION);
-        Self::bump_instance_ttl(&env);
+        bump_instance_ttl(&env);
 
         env.events().publish((symbol_short!("init"),), admin);
         Ok(())
@@ -117,7 +117,7 @@ impl Admin {
         }
 
         env.storage().instance().set(&DataKey::Paused, &true);
-        Self::bump_instance_ttl(&env);
+        bump_instance_ttl(&env);
         env.events().publish((symbol_short!("pause"),), reason);
         Ok(())
     }
@@ -132,7 +132,7 @@ impl Admin {
         }
 
         env.storage().instance().set(&DataKey::Paused, &false);
-        Self::bump_instance_ttl(&env);
+        bump_instance_ttl(&env);
         env.events().publish((symbol_short!("unpause"),), ());
         Ok(())
     }
@@ -142,12 +142,12 @@ impl Admin {
     /// Returns `false` for an uninitialised contract rather than erroring: callers
     /// use this as a cheap guard and a missing contract is not "paused".
     pub fn is_paused(env: Env) -> bool {
-        Self::paused_flag(&env)
+        paused_flag(&env)
     }
 
     /// The configured default fee rate, in basis points.
     pub fn default_rate(env: Env) -> Result<u32, ContractError> {
-        Self::require_current_schema(&env)?;
+        require_current_schema(&env)?;
         env.storage()
             .instance()
             .get(&DataKey::DefaultRate)
@@ -155,53 +155,6 @@ impl Admin {
     }
 }
 
-fn schema(&mut self, env: &Env) -> Result<u32, ContractError> {
-    if let Some(v) = self.schema {
-        return Ok(v);
-    }
-    let v: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::Schema)
-        .ok_or(ContractError::NotInitialized)?;
-    self.schema = Some(v);
-    Ok(v)
-}
-
-fn admin(&mut self, env: &Env) -> Result<Address, ContractError> {
-    if let Some(v) = self.admin.clone() {
-        return Ok(v);
-    }
-    let v: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(ContractError::NotInitialized)?;
-    self.admin = Some(v.clone());
-    Ok(v)
-}
-
-fn paused(&mut self, env: &Env) -> bool {
-    if let Some(v) = self.paused {
-        return v;
-    }
-    let v = env
-        .storage()
-        .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false);
-    self.paused = Some(v);
-    v
-}
-
-/// Validate schema and admin auth in one pass, reusing cached reads.
-fn require_current_schema_and_admin(&mut self, env: &Env) -> Result<(), ContractError> {
-    check_schema_version(Some(self.schema(env)?), SCHEMA_VERSION)?;
-    let admin = self.admin(env)?;
-    admin.require_auth();
-    Ok(())
-}
-}
 
 /// Initialise with an admin and a starting fee rate.
 pub fn init(env: Env, admin: Address, default_fee_bp: u32) -> Result<(), ContractError> {

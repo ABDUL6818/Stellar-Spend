@@ -2,7 +2,7 @@
 //!
 //! All setup comes from [`crate::test_utils`] (issue #818).
 use stellar_spend_shared::errors::ContractError;
-use soroban_sdk::{Address, Vec};
+use soroban_sdk::{symbol_short, Address, Vec};
 
 use crate::test_utils::{assert_fresh_init_is_current, TreasuryTest};
 use crate::{MAX_FEE_TIERS, MAX_SINGLE_FEE_BP, SCHEMA_VERSION};

@@ -27,9 +27,10 @@ fn release_is_rejected_without_the_authoritys_authorisation() {
     assert!(t.client().try_release(&id, &recipient).is_err());
 
     let deposit = t.deposits_v2().get(id).expect("deposit must still exist");
-    assert!(
-        !deposit.released,
-        "a rejected release must not mark the deposit released"
+    assert_ne!(
+        deposit.status,
+        escrow::EscrowStatus::Resolved,
+        "a rejected release must not mark the deposit resolved"
     );
 }
 
