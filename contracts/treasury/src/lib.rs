@@ -151,8 +151,18 @@ impl TreasuryContract {
         schedule.set(1_000_000u64, 25);
         schedule.set(10_000_000u64, 10);
 
+        let initial_state = TreasuryState {
+            total_balance: 0,
+            reserved: 0,
+            available: 0,
+        };
+        // Until the admin points fees elsewhere via `update_treasury`, the admin
+        // is the treasury.
+        let treasury = admin.clone();
+
         env.storage().instance().set(&String::from_str(&env, "state"), &initial_state);
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
         env.storage().instance().set(&DataKey::FeeSchedule, &schedule);
         env.storage().instance().set(&DataKey::Schema, &SCHEMA_VERSION);
         env.storage().instance().set(&DataKey::TotalCollected, &0i128);
@@ -334,20 +344,21 @@ impl TreasuryContract {
         Ok(())
     }
 
-    /// The full stored fee schedule.
-    pub fn get_fee_schedule(env: Env) -> Result<Map<u64, u32>, ContractError> {
-        Self::require_current_schema(&env)?;
-        Self::load_schedule(&env)
-    }
-
-    /// The address collected fees are routed to.
-    pub fn get_treasury(env: Env) -> Result<Address, ContractError> {
+    /// The current balance ledger.
+    pub fn get_state(env: Env) -> Result<TreasuryState, ContractError> {
         Self::require_current_schema(&env)?;
         env.storage()
             .instance()
             .get(&String::from_str(&env, "state"))
             .ok_or(ContractError::NotInitialized)
     }
+
+    /// The full stored fee schedule.
+    pub fn get_fee_schedule(env: Env) -> Result<Map<u64, u32>, ContractError> {
+        Self::require_current_schema(&env)?;
+        Self::load_schedule(&env)
+    }
+
 
     /// Select the fee tier for a given amount from the schedule.
     fn select_tier(schedule: &Map<u64, u32>, amount: i128) -> u32 {
@@ -476,6 +487,17 @@ impl TreasuryContract {
         }
         let schedule = Self::load_schedule(&env)?;
         Ok(Self::select_tier(&schedule, amount))
+    }
+
+    /// Replace the contract WASM. Admin only.
+    ///
+    /// Storage is untouched by the swap; run `migrate` afterwards if the new build
+    /// expects a newer layout.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish((symbol_short!("upgrade"),), ());
+        Ok(())
     }
 
     /// Convert persisted state to [`SCHEMA_VERSION`]. Returns the version migrated from.
