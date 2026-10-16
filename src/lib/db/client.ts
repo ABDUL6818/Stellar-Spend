@@ -73,6 +73,15 @@ export const pool: Pick<Pool, 'query'> = {
   },
 } as Pick<Pool, 'query'>;
 
+/** Stats for the single shared pool owned by this module. */
+export function getSharedPoolStats(): { totalCount: number; idleCount: number; waitingCount: number } {
+  return {
+    totalCount: _pool.totalCount,
+    idleCount: _pool.idleCount,
+    waitingCount: _pool.waitingCount,
+  };
+}
+
 // Graceful shutdown
 export async function closePool(): Promise<void> {
   await _pool.end();
