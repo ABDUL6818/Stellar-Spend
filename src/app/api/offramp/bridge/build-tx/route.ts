@@ -9,6 +9,7 @@ import { extractErrorMessage } from '@/lib/offramp';
 import { buildTxLimiter, getClientIp } from '@/lib/offramp';
 import { generateRequestId, createRequestLogger } from '@/lib/offramp';
 import { ErrorHandler } from '@/lib/error-handler';
+import { ApiError, ErrorType } from '@/lib/error-types';
 import { allbridgeBreaker, CircuitOpenError } from '@/lib/circuit-breaker';
 
 export const maxDuration = 30;
@@ -113,9 +114,12 @@ export async function POST(request: NextRequest) {
       ) {
         logger.logError(503, 'Bridge service temporarily unavailable');
         return withRequestId(
-          NextResponse.json(
-            { error: 'Bridge service is temporarily unavailable. Please try again shortly.' },
-            { status: 503 },
+          ErrorHandler.handle(
+            new ApiError(
+              ErrorType.EXTERNAL_SERVICE,
+              'Bridge service is temporarily unavailable. Please try again shortly.',
+              503,
+            ),
           ),
           requestId,
         );
