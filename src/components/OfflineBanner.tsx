@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useBackgroundSync } from '@/lib/background-sync';
+import { useBackgroundSync, useOnlineStatus } from '@/lib/background-sync';
 import { CHROME_TOKENS } from '@/lib/theme-tokens';
 
 /**
@@ -9,25 +9,10 @@ import { CHROME_TOKENS } from '@/lib/theme-tokens';
  * any actions queued via useBackgroundSync once connectivity returns.
  */
 export default function OfflineBanner() {
-  const [isOffline, setIsOffline] = useState(false);
+  const isOffline = !useOnlineStatus();
   const [isSyncing, setIsSyncing] = useState(false);
   const { failedTransactions, retryFailedTransaction } = useBackgroundSync();
   const wasOffline = useRef(false);
-
-  useEffect(() => {
-    setIsOffline(!navigator.onLine);
-
-    const handleOnline = () => setIsOffline(false);
-    const handleOffline = () => setIsOffline(true);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
 
   // When connectivity returns after being offline, retry any queued actions.
   useEffect(() => {
