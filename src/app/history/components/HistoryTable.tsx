@@ -20,7 +20,7 @@ const headerClass =
 /**
  * Presentational, sortable transaction history table.
  *
- * Rows use the roving tabindex pattern (see ACCESSIBILITY.md): only the
+ * Rows use the roving tabindex pattern (see docs/archive/ACCESSIBILITY.md): only the
  * active row is in the natural Tab sequence, ArrowUp/ArrowDown move that
  * focus between rows, and Tab moves into/out of the focused row's own
  * controls (links, note editor, claim button) as normal.
