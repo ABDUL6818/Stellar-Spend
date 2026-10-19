@@ -704,3 +704,187 @@ Then select which snapshots to update.
 
 Snapshot test files are excluded from code coverage calculations by default (see `vitest.config.ts` exclude patterns). This prevents snapshot-heavy tests from inflating coverage metrics.
 
+
+
+---
+
+## Storybook Interaction Tests (Issue #1347)
+
+### Overview
+
+Storybook interaction tests use the `play()` function to simulate user interactions and verify component behavior within stories. These tests run in a real browser via Vitest with the Playwright provider, providing more realistic interaction testing than unit tests alone.
+
+### When to use interaction tests vs. unit tests
+
+| Scenario | Interaction Test | Unit Test |
+| --- | --- | --- |
+| Testing click handlers | ✅ Use play() | Unit test callback |
+| Testing form input | ✅ Use play() | Unit test value/onChange |
+| Testing focus/blur | ✅ Use play() | Unit test for aria attributes |
+| Testing accessibility | ✅ Use play() | Unit test tree structure |
+| Testing business logic | ❌ | ✅ Use unit test |
+| Testing error states | Interaction for UI, unit for logic | Unit test |
+
+### Core UI primitives with interaction tests
+
+Interaction tests have been added to the following core components:
+
+| Component | Tests Added | Coverage |
+| --- | --- | --- |
+| `Button` | Interactive, InteractiveWithCallback | Click, enabled/disabled state |
+| `Input` | Interactive, InteractiveWithClear, DisabledInteraction | Type, focus/blur, disabled state |
+| `Label` | Interactive, AccessibilityTest | htmlFor association, tag structure |
+| `Badge` | Interactive, VariantStates | Rendering, variant display |
+| `Alert` | Interactive, VariantDisplay | Title/body rendering, variant states |
+| `Card` | Interactive, InteractiveWithButtons | Composition (header/content/footer), button interaction |
+
+### Writing Storybook interaction tests
+
+#### Basic pattern
+
+```tsx
+import type { Meta, StoryObj } from '@storybook/react';
+import { userEvent, within, expect } from '@storybook/test';
+import { MyComponent } from './MyComponent';
+
+const meta: Meta<typeof MyComponent> = {
+  title: 'Components/MyComponent',
+  component: MyComponent,
+};
+
+export default meta;
+type Story = StoryObj<typeof MyComponent>;
+
+export const Interactive: Story = {
+  args: { /* story args */ },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    
+    // 1. Query the element
+    const element = canvas.getByRole('button', { name: /click me/i });
+    
+    // 2. Simulate user interaction
+    await userEvent.click(element);
+    
+    // 3. Assert the result
+    await expect(element).toBeInTheDocument();
+  },
+};
+```
+
+#### Key imports
+
+```tsx
+import { userEvent, within, expect } from '@storybook/test';
+```
+
+- **`userEvent`:** simulates realistic user interactions (click, type, hover, etc.)
+- **`within`:** scopes DOM queries to the component canvas
+- **`expect`:** assertions from Vitest (same as unit tests)
+
+#### Common interactions
+
+```tsx
+// Click
+await userEvent.click(button);
+
+// Type text
+await userEvent.type(input, 'Hello');
+
+// Clear input
+await userEvent.clear(input);
+
+// Focus
+await userEvent.click(input); // Focus on click
+
+// Tab (navigate focus)
+await userEvent.tab();
+
+// Hover
+await userEvent.hover(element);
+
+// Keyboard shortcuts
+await userEvent.hotKeys(element, 'ctrl+a'); // Select all
+await userEvent.hotKeys(element, 'Escape');  // Escape key
+```
+
+#### Common assertions
+
+```tsx
+// DOM presence
+await expect(element).toBeInTheDocument();
+
+// Value (for inputs)
+await expect(input).toHaveValue('expected value');
+
+// Attributes
+await expect(element).toHaveAttribute('disabled');
+await expect(label).toHaveAttribute('for', 'input-id');
+
+// Classes (for styled variants)
+await expect(button).toHaveClass('primary');
+
+// Text content
+await expect(element).toHaveTextContent('Text');
+await expect(element).toHaveText Exact('Exact Text');
+
+// Disabled state
+await expect(button).toBeDisabled();
+await expect(input).not.toBeDisabled();
+
+// Focus
+await expect(input).toHaveFocus();
+```
+
+### Running interaction tests
+
+#### Run all Storybook tests
+
+```bash
+npm run test-storybook
+```
+
+#### Run tests for a specific story file
+
+```bash
+npm run test-storybook -- src/components/ui/Button.stories.tsx
+```
+
+#### Run tests in headed mode (see browser)
+
+```bash
+npm run test-storybook -- --headed
+```
+
+#### Debug a failing story
+
+```bash
+npm run test-storybook -- src/components/ui/Button.stories.tsx --headed
+```
+
+Then open the browser DevTools to inspect the component and interaction.
+
+### Best practices
+
+1. **Keep interactions realistic:** use `userEvent` (not `fireEvent`) for natural interaction patterns
+2. **Test one scenario per story:** don't combine multiple interactions into one play() function
+3. **Scope with `within(canvasElement)`:** prevents queries from leaking outside the component
+4. **Assert state changes, not implementation:** check what the user sees/experiences, not internal state
+5. **Use accessible queries:** prefer `getByRole()`, `getByLabelText()` over `getByTestId()`
+6. **Comment complex interactions:** explain why a test exists if not obvious
+
+### Troubleshooting
+
+**"Element not found" error:**
+- Use `getByRole('button', { name: /label/i })` for better debugging
+- Add `screen.debug()` in the play() function to see the rendered HTML
+
+**Flaky tests (sometimes pass, sometimes fail):**
+- Add `await page.waitForLoadState('networkidle')` if component fetches data
+- Avoid hard timeouts; use assertions that wait (Storybook waits up to 10s by default)
+
+**Tests run locally but fail in CI:**
+- Ensure all args are provided (no undefined values)
+- Mock external dependencies consistently
+- Check browser version compatibility (Playwright uses Chromium in CI)
+
