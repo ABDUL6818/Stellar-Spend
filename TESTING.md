@@ -573,3 +573,134 @@ If `npm run test:coverage` shows unexpected gaps:
 
 4. **Review branch coverage:** branch coverage is often lower than line coverage. Open the HTML report and hover over red branches to see which condition branches are missed.
 
+
+
+---
+
+## Snapshot Testing & Hygiene (Issue #1346)
+
+### Overview
+
+Snapshots capture the exact output of a test and compare future test runs against that baseline. Snapshots are useful for complex object serialization or large text diffs, but they can become stale or orphaned if not properly maintained.
+
+### When to use snapshots
+
+Use snapshots for:
+
+- **Complex serialized objects:** database records, API responses, or multi-line JSON with many nested fields
+- **HTML/component output:** when testing the structure of a rendered component with many children
+- **Generated text:** compiled SQL, transformed code, or formatted output strings
+- **Approval workflows:** when a human needs to review and approve a change to the output format
+
+**Do NOT use snapshots for:**
+
+- **Constantly-changing data:** timestamps, random IDs, or dynamic content that fails on every run
+- **Brittle HTML structure:** component renders that change often; prefer explicit `getByRole()` assertions instead
+- **Simple values:** if the expected value is short (< 50 chars), write it explicitly: `expect(result).toBe('exact value')`
+- **Snapshot-only testing:** always include at least one explicit assertion alongside snapshots to catch logic errors
+
+### Snapshot file locations
+
+Snapshots live in `__snapshots__/` directories collocated with their test files:
+
+```
+src/lib/
+  formatters.test.ts
+  __snapshots__/
+    formatters.test.ts.snap
+```
+
+### Creating snapshots
+
+Run tests in update mode to create or update snapshots:
+
+```bash
+# Update all snapshots
+npm run test:snapshots:update
+
+# Update snapshots for a specific file
+npm run test:snapshots:update -- src/lib/formatters.test.ts
+```
+
+When you update snapshots, **always review the diff** in version control before committing. Look for:
+
+- Changes you expected (e.g., new fields added to an object)
+- Changes you did NOT expect (e.g., data format drift, accidental code changes)
+- Increased output size or redundancy
+
+### Snapshot validation
+
+Before committing, validate that all snapshots are hygenic:
+
+```bash
+npm run test:snapshots:validate
+```
+
+This checks for:
+
+- **Orphaned snapshots:** snapshot files with no corresponding test file
+- **Missing snapshots:** test files that call `.toMatchSnapshot()` but have no `.snap` file
+- **Formatting issues:** trailing whitespace or invalid format in snapshot files
+
+Validation also runs as a pre-commit hook (when Husky is set up) to prevent orphaned snapshots from entering the repo.
+
+### Reviewing snapshot changes in GitHub
+
+When a PR includes snapshot updates:
+
+1. **GitHub PR view:** click "Display the rich diff" or "Show spaces and tabs" to see the exact changes
+2. **Local review:** check out the PR branch and run `npm test` to see the diff in the terminal
+3. **Approve with context:** look for explanations in the PR description or commit messages about why snapshots changed
+
+### Debugging snapshot failures
+
+If a test fails with a snapshot mismatch:
+
+```bash
+# View the difference
+npm run test:snapshots -- src/lib/formatters.test.ts
+```
+
+You'll see:
+
+```
+Snapshot name: `should format date correctly`
+- Snapshot
++ Received
+
+- {foo: "bar"}
++ {foo: "baz"}
+```
+
+**Option 1: The test is wrong** — Fix the test logic and re-run
+
+**Option 2: The snapshot is outdated** — Review the change, then:
+```bash
+npm run test:snapshots:update -- src/lib/formatters.test.ts
+```
+
+**Option 3: Partial updates** — Some snapshots changed, some didn't. Use interactive mode:
+```bash
+npm run test:snapshots -- --reporter=verbose
+```
+
+Then select which snapshots to update.
+
+### Snapshot best practices
+
+1. **Keep snapshots small:** if a snapshot grows beyond 20 lines, consider breaking the test into smaller assertions
+2. **Write assertion comments:** explain why a particular field is expected
+   ```ts
+   expect(apiResponse).toMatchSnapshot(); // API returns paginated results with metadata
+   ```
+3. **Use inline snapshots for small values:**
+   ```ts
+   expect(formatDate('2024-01-15')).toMatchInlineSnapshot(`"Jan 15, 2024"`)
+   ```
+4. **Test one scenario per snapshot:** don't combine multiple test cases into one snapshot
+5. **Update CI snapshots carefully:** never auto-update snapshots in CI; always require a developer to review and commit the change locally
+
+### Snapshot exclusions from coverage
+
+Snapshot test files are excluded from code coverage calculations by default (see `vitest.config.ts` exclude patterns). This prevents snapshot-heavy tests from inflating coverage metrics.
+
