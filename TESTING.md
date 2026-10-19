@@ -483,3 +483,93 @@ await page.route('**/api/kyc**', (route) =>
   }),
 );
 ```
+
+
+---
+
+## Code Coverage Thresholds (Issue #1348)
+
+### Overview
+
+Stellar-Spend enforces code coverage thresholds to prevent coverage regressions and maintain test suite quality. Coverage is measured across all test runs and reported in the HTML coverage report at `./coverage/index.html`.
+
+### Global thresholds
+
+All files must meet these minimum thresholds:
+
+| Metric       | Threshold |
+| ------------ | --------- |
+| Lines        | 85%       |
+| Statements   | 85%       |
+| Functions    | 85%       |
+| Branches     | 80%       |
+
+### Per-file thresholds for critical paths
+
+Some modules have stricter per-file thresholds due to their security/payment-critical nature:
+
+| Module               | Lines | Statements | Functions | Branches | Reason                     |
+| -------------------- | ----- | ---------- | --------- | -------- | -------------------------- |
+| `src/lib/auth/**`    | 90%   | 90%        | 90%       | 85%      | Security-critical         |
+| `src/lib/offramp/**` | 85%   | 85%        | 85%       | 80%      | Payment flows              |
+| `src/lib/onramp/**`  | 85%   | 85%        | 85%       | 80%      | Onboarding flows           |
+| `src/app/api/**`     | 80%   | 80%        | 80%       | 75%      | Route handlers (lower req.) |
+
+### Running coverage locally
+
+```bash
+# Generate a new coverage report
+npm run test:coverage
+
+# Or use vitest directly
+npx vitest run --coverage
+
+# View the HTML report
+open coverage/index.html
+```
+
+### CI enforcement
+
+A GitHub Actions workflow (`.github/workflows/test-coverage.yml`) runs on every PR and enforces coverage thresholds. The workflow:
+
+1. Runs all tests with coverage collection
+2. Fails if any global or per-file threshold is not met
+3. Posts a comment on the PR with the coverage summary
+4. Uploads the coverage report as an artifact for review
+
+### Coverage failures
+
+If a PR fails the coverage check:
+
+1. **View the report:** download the artifact from the Actions tab or run locally with `npm run test:coverage`
+2. **Identify gaps:** open `coverage/index.html`, find the uncovered lines/branches
+3. **Write tests:** add or update tests to cover the gaps
+4. **Verify:** re-run locally until `npm run test:coverage` passes, then push
+5. **Re-check:** the CI workflow will re-run automatically and pass
+
+### Best practices for maintaining coverage
+
+- **Test behavior, not implementation:** aim for high branch coverage by testing both happy-path and error branches (not just lines).
+- **Focus on critical paths:** don't just increase coverage for coverage's sake; prioritize security/payment flows.
+- **Use snapshots sparingly:** snapshot tests can inflate coverage without catching real bugs. Prefer explicit assertions.
+- **Mock external boundaries:** mock SDKs and APIs so tests are fast and deterministic; real network calls slow down the suite.
+- **Exclude test utilities:** generated code, fixtures, and test helpers are excluded from coverage (see `exclude` in `vitest.config.ts`).
+
+### Debugging coverage gaps
+
+If `npm run test:coverage` shows unexpected gaps:
+
+1. **Run a focused test file:**
+   ```bash
+   npx vitest run --coverage src/lib/your-module.test.ts
+   ```
+
+2. **Check which test covered which line:**
+   ```bash
+   npx vitest run --coverage -- --reporter=verbose src/lib/your-module.test.ts
+   ```
+
+3. **Check for dead code:** if a line is never covered despite a test, it may be unreachable or a logic error. Simplify or remove it.
+
+4. **Review branch coverage:** branch coverage is often lower than line coverage. Open the HTML report and hover over red branches to see which condition branches are missed.
+
