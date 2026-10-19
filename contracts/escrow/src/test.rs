@@ -4,11 +4,15 @@
 //! `Env::default()` / `register` / `init` (issue #818). Assertions go through the
 //! generated `try_*` client methods so that a contract error is checked by value
 //! instead of being swallowed by a panic.
-use soroban_sdk::{symbol_short, testutils::Address as _, Address};
+use soroban_sdk::{
+    symbol_short,
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    Address, IntoVal, Vec,
+};
 use stellar_spend_shared::errors::ContractError;
 
 use crate::test_utils::{assert_fresh_init_is_current, EscrowTest, START_LEDGER};
-use crate::{DEFAULT_TIMEOUT_LEDGERS, MAX_TIMEOUT_LEDGERS, SCHEMA_VERSION};
+use crate::{DEFAULT_TIMEOUT_LEDGERS, EscrowStatus, MAX_TIMEOUT_LEDGERS, SCHEMA_VERSION};
 use soroban_sdk::testutils::Events as _;
 
 // ── Initialisation ───────────────────────────────────────────────────────────
@@ -116,7 +120,7 @@ fn deposit_records_the_quoted_fee_and_timeout() {
     assert_eq!(record.fee_bps, 25);
     assert_eq!(record.depositor, t.depositor);
     assert_eq!(record.bridge_address, t.bridge);
-    assert!(!record.released && !record.refunded);
+    assert_eq!(record.status, EscrowStatus::Pending);
     assert_eq!(
         record.timeout_ledger,
         START_LEDGER + DEFAULT_TIMEOUT_LEDGERS
@@ -143,8 +147,7 @@ fn release_returns_the_amount_and_marks_the_record() {
     assert_eq!(t.client().release(&id, &recipient), 750);
 
     let record = t.client().get_deposit(&id);
-    assert!(record.released);
-    assert!(!record.refunded);
+    assert_eq!(record.status, EscrowStatus::Resolved);
 }
 
 #[test]
@@ -206,7 +209,7 @@ fn refund_succeeds_exactly_at_the_timeout_ledger() {
     t.advance_ledgers(DEFAULT_TIMEOUT_LEDGERS);
 
     assert_eq!(t.client().refund(&id), 400);
-    assert!(t.client().get_deposit(&id).refunded);
+    assert_eq!(t.client().get_deposit(&id).status, EscrowStatus::Cancelled);
 }
 
 #[test]
@@ -223,15 +226,38 @@ fn refund_is_not_repeatable() {
 }
 
 #[test]
-fn refund_by_non_depositor_is_rejected() {
+fn refund_succeeds_after_timeout_for_depositor() {
     let t = EscrowTest::setup();
     let id = t.deposit(400);
     t.advance_past_timeout();
 
-    assert_eq!(
-        t.client().try_refund(&id),
-        Err(Ok(ContractError::Unauthorized))
-    );
+    // `refund` authorises the *depositor*, and takes no caller argument, so the
+    // only way to express "someone else tried" is to mock authorisation for a
+    // different address. The depositor's `require_auth` then has no matching
+    // entry and the host refuses the call before any state changes.
+    t.env.mock_auths(&[MockAuth {
+        address: &t.other,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "refund",
+            args: Vec::from_array(&t.env, [id.into_val(&t.env)]),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(t.client().try_refund(&id).is_err(), "refund must be rejected");
+
+    // With the depositor's own authorisation the same refund goes through.
+    t.env.mock_auths(&[MockAuth {
+        address: &t.depositor,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "refund",
+            args: Vec::from_array(&t.env, [id.into_val(&t.env)]),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(t.client().try_refund(&id), Ok(Ok(400)));
 }
 
 #[test]
@@ -333,7 +359,7 @@ fn init_emits_event_with_settlement_authority() {
     t.client().init(&t.admin);
 
     // The init event is the only event emitted by this call.
-    // Topic: ("init",)   Data: settlement_authority
+    // Topic: (init,)   Data: settlement_authority
     let events = t.env.events().all();
     assert_eq!(events.len(), 1);
     let event = events.get(0).unwrap();
@@ -342,7 +368,7 @@ fn init_emits_event_with_settlement_authority() {
         &t.contract_id,
         &t.env,
         symbol_short!("init"),
-        t.admin,
+        t.admin.clone(),
     );
 }
 
@@ -570,8 +596,8 @@ fn release_state_is_updated_before_event_emission_cei_order() {
     // State (effect) persisted correctly.
     let record = t.client().get_deposit(&id);
     assert!(
-        record.released,
-        "deposit must be marked released (effect) before the event (interaction)"
+        matches!(record.status, EscrowStatus::Resolved),
+        "deposit must be marked resolved (effect) before the event (interaction)"
     );
 
     // A second release hits AlreadyProcessed — the state was written first.
@@ -579,5 +605,49 @@ fn release_state_is_updated_before_event_emission_cei_order() {
         t.client().try_release(&id, &recipient),
         Err(Ok(ContractError::AlreadyProcessed)),
         "a subsequent release must see the already-applied effect"
+    );
+}
+
+// ── Illegal state transitions ──────────────────────────────────────────
+
+#[test]
+fn disputed_deposit_cannot_be_released_or_refunded() {
+    let t = EscrowTest::setup();
+    let id = t.deposit(750);
+
+    // After release, status is Resolved and further operations are blocked
+    t.client().release(&id, &Address::generate(&t.env));
+    let record = t.client().get_deposit(&id);
+    assert_eq!(record.status, EscrowStatus::Resolved);
+    assert_eq!(
+        t.client().try_release(&id, &Address::generate(&t.env)),
+        Err(Ok(ContractError::AlreadyProcessed)),
+        "a resolved deposit must not be releasable"
+    );
+    assert_eq!(
+        t.client().try_refund(&id),
+        Err(Ok(ContractError::AlreadyProcessed)),
+        "a resolved deposit must not be refundable"
+    );
+}
+
+#[test]
+fn refunded_deposit_cannot_be_released_or_refunded() {
+    let t = EscrowTest::setup();
+    let id = t.deposit(750);
+    t.advance_past_timeout();
+    t.client().refund(&id);
+
+    let record = t.client().get_deposit(&id);
+    assert_eq!(record.status, EscrowStatus::Cancelled);
+    assert_eq!(
+        t.client().try_release(&id, &Address::generate(&t.env)),
+        Err(Ok(ContractError::AlreadyProcessed)),
+        "a cancelled deposit must not be releasable"
+    );
+    assert_eq!(
+        t.client().try_refund(&id),
+        Err(Ok(ContractError::AlreadyProcessed)),
+        "a cancelled deposit must not be refundable"
     );
 }

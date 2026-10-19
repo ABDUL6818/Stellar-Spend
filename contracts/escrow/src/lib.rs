@@ -44,16 +44,15 @@
 //! | `dispute`     | [`EscrowContract::set_timeout`], `can_refund`        |
 
 #![no_std]
+mod dispute;
+mod create;
+mod refund;
+mod release;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map};
 use stellar_spend_shared::{errors::ContractError, validation::check_schema_version};
 
 // ── Sub-modules (issue #812) ──────────────────────────────────────────────────
-
-pub mod create;
-pub mod dispute;
-pub mod refund;
-pub mod release;
 
 /// Current storage layout version. Bump whenever a stored type changes shape, and
 /// extend [`EscrowContract::migrate`] to convert the previous layout.
@@ -93,12 +92,39 @@ pub enum DataKey {
     Schema,
     /// Reentrancy guard: `true` while a release/refund is executing.
     Lock,
+    /// `Map<u64, Dispute>` of all disputes, keyed by escrow id.
+    Disputes,
 }
 
-/// Schema v1 deposit record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    Pending,
+    Active,
+    Disputed,
+    Resolved,
+    Cancelled,
+}
+
+/// Deposit record (schema v2).
 ///
-/// Retained solely so [`EscrowContract::migrate`] can decode entries written by a
-/// v1 build. Current code never writes this shape.
+/// v1 records carried `released`/`refunded` flags and no `fee_bps`;
+/// [`EscrowContract::migrate`] maps those flags onto `status` and defaults the fee to `0`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowDeposit {
+    pub depositor: Address,
+    pub amount: i128,
+    pub bridge_address: Address,
+    pub timestamp: u64,
+    pub timeout_ledger: u32,
+    pub status: EscrowStatus,
+    pub fee_bps: u32,
+}
+
+/// Deposit record as written by schema v1 (no `fee_bps`, `released`/`refunded` flags).
+///
+/// Retained so [`EscrowContract::migrate`] can decode entries from an older build.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowDepositV1 {
@@ -109,22 +135,6 @@ pub struct EscrowDepositV1 {
     pub timeout_ledger: u32,
     pub released: bool,
     pub refunded: bool,
-}
-
-/// Schema v2 deposit record: v1 plus the fee basis points quoted at deposit time.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EscrowDeposit {
-    pub depositor: Address,
-    pub amount: i128,
-    pub bridge_address: Address,
-    pub timestamp: u64,
-    pub timeout_ledger: u32,
-    pub released: bool,
-    pub refunded: bool,
-    /// Fee rate quoted when the deposit was taken. Added in schema v2; migrated
-    /// v1 records carry `0`, meaning "no fee was quoted".
-    pub fee_bps: u32,
 }
 
 #[contract]
@@ -212,7 +222,10 @@ impl EscrowContract {
 
     // ── Upgrade surface (issue #817) ──────────────────────────────────────────
 
-    /// Storage layout version currently persisted. See `README.md`.
+    /// Report the stored schema version.
+    ///
+    /// Skips `require_current_schema` on purpose: a deployment that is still on an
+    /// older layout must be able to say so, otherwise `migrate` cannot be targeted.
     pub fn schema_version(env: Env) -> Result<u32, ContractError> {
         env.storage()
             .instance()
@@ -254,9 +267,6 @@ impl EscrowContract {
         }
 
         if stored == 1 {
-            // v1 -> v2: widen every record with `fee_bps`, defaulting to 0. Reading
-            // the map as its v1 type is what makes the old entries decodable at all;
-            // reading it as v2 would fail on the missing field.
             let old: Map<u64, EscrowDepositV1> = env
                 .storage()
                 .instance()
@@ -265,6 +275,13 @@ impl EscrowContract {
 
             let mut migrated: Map<u64, EscrowDeposit> = Map::new(&env);
             for (id, v1) in old.iter() {
+                let status = if v1.released {
+                    EscrowStatus::Resolved
+                } else if v1.refunded {
+                    EscrowStatus::Cancelled
+                } else {
+                    EscrowStatus::Pending
+                };
                 migrated.set(
                     id,
                     EscrowDeposit {
@@ -273,8 +290,7 @@ impl EscrowContract {
                         bridge_address: v1.bridge_address,
                         timestamp: v1.timestamp,
                         timeout_ledger: v1.timeout_ledger,
-                        released: v1.released,
-                        refunded: v1.refunded,
+                        status,
                         fee_bps: 0,
                     },
                 );
@@ -312,3 +328,4 @@ pub mod test_utils;
 
 #[cfg(test)]
 mod test;
+mod tests;

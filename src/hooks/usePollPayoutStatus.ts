@@ -3,7 +3,7 @@
 import { useCallback } from 'react';
 import type { PayoutStatus } from '@/lib/offramp';
 import { TransactionStorage } from '@/lib/transaction-storage';
-import type { OfframpStep } from '@shared/types/stellaramp';
+import type { OfframpStep } from '@stellar-spend/shared';
 import {
   usePollingManager,
   DurationExceededError,
@@ -27,6 +27,10 @@ interface PollPayoutStatusOptions {
  * - 5 consecutive HTTP errors → rejects with descriptive connectivity error
  * - Timeout                  → rejects with "Payout polling timeout"
  * Updates TransactionStorage on every poll.
+ *
+ * Built on the shared `usePollingManager` abstraction (see `@/lib/polling`),
+ * which owns the interval/backoff/cancellation logic shared with the bridge
+ * polling hook.
  */
 export function usePollPayoutStatus() {
   const { start } = usePollingManager(PAYOUT_CONFIG);

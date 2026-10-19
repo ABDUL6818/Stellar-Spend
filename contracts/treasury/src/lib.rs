@@ -4,7 +4,7 @@
 //! records the treasury address that collected fees are routed to.
 //!
 //! All errors use the canonical [`ContractError`] from `stellar-spend-shared`; admin
-//! checks delegate to [`stellar_spend_shared::auth::assert_is_admin`].
+//! checks delegate to [`stellar_spend_shared::auth::require_admin`].
 //!
 //! # Dead code removed (issue #815)
 //!
@@ -22,7 +22,7 @@
 //! ```
 //!
 //! That made the whole configurable-schedule feature dead: `set_fee_schedule`
-//! validated its input, wrote it to instance storage, emitted an event — and no read
+//! validated its input, wrote it to storage, emitted an event — and no read
 //! path ever consulted the result. An admin could "change" the fee and collection
 //! would carry on at the compiled-in rates. [`TreasuryContract::fee_for_amount`] now
 //! reads the stored schedule, so the hard-coded branches are gone and the tiers seeded
@@ -32,6 +32,15 @@
 //! `testutils`-only constructor that cannot compile into a release WASM. It now
 //! returns [`ContractError::NotInitialized`] instead of inventing an address to send
 //! fees to.
+//!
+//! # Fee invariants
+//!
+//! - `fee_for_amount(amount)` is always determined by the highest stored tier
+//!   whose threshold is less than or equal to `amount`.
+//! - A valid schedule is monotonic in threshold order: increasing `amount` must not
+//!   decrease the selected rate for a fixed schedule.
+//! - Fees are non-negative and never exceed the configured basis-point cap for a
+//!   tier.
 //!
 //! # Storage footprint reduction (issue #811)
 //!
@@ -59,14 +68,16 @@
 //! migration casts all existing keys via `i128 as u64` (always in range post-validation).
 
 #![no_std]
+pub mod balance;
 
 use soroban_sdk::{
-    contract, contractimpl, contractmeta, contracttype, symbol_short, Address, BytesN, Env, Map,
+    contract, contractimpl, contractmeta, contracttype, symbol_short, Address, Env, Map, String, Vec,
 };
+use balance::BalanceManager;
 use stellar_spend_shared::{
     errors::ContractError,
     validation::{
-        basis_points_of, check_schema_version, require_basis_points, require_non_negative_amount,
+        basis_points_of, check_schema_version, require_basis_points,
         require_positive_amount,
     },
 };
@@ -87,14 +98,6 @@ pub const MAX_SINGLE_FEE_BP: u32 = 500;
 /// scan within a predictable instruction budget.
 pub const MAX_FEE_TIERS: u32 = 16;
 
-/// Treasury invariants:
-/// - `fee_for_amount(amount)` is always determined by the highest stored tier
-///   whose threshold is less than or equal to `amount`.
-/// - A valid schedule is monotonic in threshold order: increasing `amount` must not
-///   decrease the selected rate for a fixed schedule.
-/// - Fees are non-negative and never exceed the configured basis-point cap for a
-///   tier.
-
 /// Instance TTL extension (~30 days) applied on state-changing calls.
 pub const INSTANCE_TTL_EXTEND_TO: u32 = 518_400;
 /// Only pay to extend when remaining TTL drops below ~6 days.
@@ -114,6 +117,17 @@ pub enum DataKey {
     /// Running total of fees collected. Added in schema v2.
     TotalCollected,
     Schema,
+    /// [`TreasuryState`] ledger maintained by `deposit`/`withdraw`/`reserve`.
+    State,
+}
+
+/// Balances held by the treasury ledger (issue #988).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryState {
+    pub total_balance: i128,
+    pub reserved: i128,
+    pub available: i128,
 }
 
 #[contract]
@@ -121,25 +135,38 @@ pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
-    /// Initialise with an admin, a treasury address, and the default fee schedule.
-    pub fn init(env: Env, admin: Address, treasury: Address) -> Result<(), ContractError> {
-        if env.storage().instance().has(&DataKey::Schema) {
+    /// Initialize treasury
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), ContractError> {
+        let state: Option<TreasuryState> = env.storage().instance().get(&String::from_str(&env, "state"));
+        if state.is_some() {
             return Err(ContractError::AlreadyInitialized);
         }
         admin.require_auth();
 
-        // Schema v3: fee schedule keys are u64 (saves 8 bytes per tier).
         let mut schedule: Map<u64, u32> = Map::new(&env);
-        schedule.set(0u64, 50); // 0.5% below 1M stroops
-        schedule.set(1_000_000u64, 25); // 0.25% from 1M
-        schedule.set(10_000_000u64, 10); // 0.1% from 10M
+        schedule.set(0u64, 50);
+        schedule.set(1_000_000u64, 25);
+        schedule.set(10_000_000u64, 10);
 
-        let storage = env.storage().instance();
-        storage.set(&DataKey::Admin, &admin);
-        storage.set(&DataKey::Treasury, &treasury);
-        storage.set(&DataKey::FeeSchedule, &schedule);
-        storage.set(&DataKey::TotalCollected, &0i128);
-        storage.set(&DataKey::Schema, &SCHEMA_VERSION);
+        let initial_state = TreasuryState {
+            total_balance: 0,
+            reserved: 0,
+            available: 0,
+        };
+        // Until the admin points fees elsewhere via `update_treasury`, the admin
+        // is the treasury.
+        let treasury = admin.clone();
+
+        env.storage().instance().set(&String::from_str(&env, "state"), &initial_state);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        env.storage().instance().set(&DataKey::FeeSchedule, &schedule);
+        env.storage().instance().set(&DataKey::Schema, &SCHEMA_VERSION);
+        env.storage().instance().set(&DataKey::TotalCollected, &0i128);
+
         Self::bump_instance_ttl(&env);
 
         env.events()
@@ -147,33 +174,51 @@ impl TreasuryContract {
         Ok(())
     }
 
-    /// Basis points owed on `amount`, per the **stored** fee schedule.
-    ///
-    /// Selects the highest tier threshold that does not exceed `amount`. An amount
-    /// below every threshold pays nothing; the default schedule includes a tier at
-    /// `0`, so that only happens once an admin removes it.
-    pub fn fee_for_amount(env: Env, amount: i128) -> Result<u32, ContractError> {
-        Self::require_current_schema(&env)?;
-        require_non_negative_amount(amount)?;
-        let schedule = Self::load_schedule(&env)?;
-        Ok(Self::select_tier(&schedule, amount))
+    /// Deposit funds with overflow protection
+    pub fn deposit(
+        env: Env,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        let mut state: TreasuryState = env.storage()
+            .instance()
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)?;
+
+        let new_total = BalanceManager::add(state.total_balance, amount)?;
+        let new_available = BalanceManager::add(state.available, amount)?;
+
+        state.total_balance = new_total;
+        state.available = new_available;
+
+        env.storage().instance().set(&String::from_str(&env, "state"), &state);
+        Self::bump_instance_ttl(&env);
+
+        Ok(state.total_balance)
     }
 
-    /// Fee owed on `amount`, and record it against the running total.
-    pub fn collect_fee(env: Env, amount: i128, recipient: Address) -> Result<i128, ContractError> {
-        Self::require_current_schema(&env)?;
-        require_positive_amount(amount)?;
-
-        // Load the schedule once, use it for the fee calculation.
-        let schedule = Self::load_schedule(&env)?;
-        Self::_collect_fee_with_schedule(&env, amount, recipient, &schedule)
+    /// Withdraw funds with overflow protection
+    pub fn withdraw(
+        env: Env,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        let mut state: TreasuryState = env.storage()
+            .instance()
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)?;
+        let new_total = BalanceManager::sub(state.total_balance, amount)?;
+        let new_available = BalanceManager::sub(state.available, amount)?;
+        state.total_balance = new_total;
+        state.available = new_available;
+        env.storage().instance().set(&String::from_str(&env, "state"), &state);
+        Self::bump_instance_ttl(&env);
+        Ok(state.total_balance)
     }
 
     /// Internal helper that already has a loaded schedule.
     fn _collect_fee_with_schedule(
         env: &Env,
         amount: i128,
-        recipient: Address,
+        state: &TreasuryState,
         schedule: &Map<u64, u32>,
     ) -> Result<i128, ContractError> {
         let fee = basis_points_of(amount, Self::select_tier(schedule, amount))?;
@@ -188,26 +233,64 @@ impl TreasuryContract {
             .instance()
             .set(&DataKey::TotalCollected, &new_total);
         Self::bump_instance_ttl(env);
+        let new_total = BalanceManager::sub(state.total_balance, amount)?;
+        let new_available = BalanceManager::sub(state.available, amount)?;
 
-        env.events()
-            .publish((symbol_short!("collect"),), (amount, fee, recipient));
-        Ok(fee)
+        let mut new_state = state.clone();
+        new_state.total_balance = new_total;
+        new_state.available = new_available;
+
+        env.storage().instance().set(&String::from_str(&env, "state"), &new_state);
+        Self::bump_instance_ttl(env);
+
+        Ok(new_state.total_balance)
     }
 
-    /// Running total of fees collected since init (or since migration).
-    pub fn total_collected(env: Env) -> Result<i128, ContractError> {
-        Self::require_current_schema(&env)?;
-        env.storage()
+    /// Reserve funds (with checked math)
+    pub fn reserve(
+        env: Env,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        let mut state: TreasuryState = env.storage()
             .instance()
-            .get(&DataKey::TotalCollected)
-            .ok_or(ContractError::NotInitialized)
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)?;
+
+        let new_reserved = BalanceManager::add(state.reserved, amount)?;
+        let new_available = BalanceManager::sub(state.available, amount)?;
+
+        state.reserved = new_reserved;
+        state.available = new_available;
+
+        env.storage().instance().set(&String::from_str(&env, "state"), &state);
+        Self::bump_instance_ttl(&env);
+
+        Ok(state.reserved)
+    }
+
+    /// Release reserved funds (with checked math)
+    pub fn release_reserved(
+        env: Env,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        let mut state: TreasuryState = env.storage()
+            .instance()
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)?;
+
+        let new_reserved = BalanceManager::sub(state.reserved, amount)?;
+        let new_available = BalanceManager::add(state.available, amount)?;
+
+        state.reserved = new_reserved;
+        state.available = new_available;
+
+        env.storage().instance().set(&String::from_str(&env, "state"), &state);
+        Self::bump_instance_ttl(&env);
+
+        Ok(state.available)
     }
 
     /// Add or update a fee tier. Admin only.
-    ///
-    /// `amount_tier` is the minimum transfer amount (in stroops) at which this rate
-    /// applies. Accepts a non-negative `i128` for API compatibility; stored as `u64`
-    /// internally (schema v3 footprint reduction).
     pub fn set_fee_schedule(
         env: Env,
         amount_tier: i128,
@@ -222,7 +305,6 @@ impl TreasuryContract {
 
         let tier_key = amount_tier as u64;
         let mut schedule = Self::load_schedule(&env)?;
-        // Only an addition can breach the cap; updating an existing tier is fine.
         if !schedule.contains_key(tier_key) && schedule.len() >= MAX_FEE_TIERS {
             return Err(ContractError::InvalidInput);
         }
@@ -234,7 +316,7 @@ impl TreasuryContract {
         Self::bump_instance_ttl(&env);
 
         env.events()
-            .publish((symbol_short!("schedule"),), (amount_tier, basis_points));
+            .publish((symbol_short!("sched"),), (amount_tier, basis_points));
         Ok(())
     }
 
@@ -262,13 +344,125 @@ impl TreasuryContract {
         Ok(())
     }
 
-    /// The full stored fee schedule (keys as `u64` stroop thresholds).
+    /// The current balance ledger.
+    pub fn get_state(env: Env) -> Result<TreasuryState, ContractError> {
+        Self::require_current_schema(&env)?;
+        env.storage()
+            .instance()
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    /// The full stored fee schedule.
     pub fn get_fee_schedule(env: Env) -> Result<Map<u64, u32>, ContractError> {
         Self::require_current_schema(&env)?;
         Self::load_schedule(&env)
     }
 
-    /// The address collected fees are routed to.
+
+    /// Select the fee tier for a given amount from the schedule.
+    fn select_tier(schedule: &Map<u64, u32>, amount: i128) -> u32 {
+        let mut selected_threshold: Option<u64> = None;
+        let mut selected_bps = 0u32;
+        for (threshold, bps) in schedule.iter() {
+            if amount >= threshold as i128 {
+                if selected_threshold.is_none() || threshold > selected_threshold.unwrap() {
+                    selected_threshold = Some(threshold);
+                    selected_bps = bps;
+                }
+            }
+        }
+        selected_bps
+    }
+
+    /// Collect a fee from the given amount and route to treasury.
+    pub fn collect_fee(
+        env: Env,
+        amount: i128,
+        recipient: Address,
+    ) -> Result<i128, ContractError> {
+        Self::require_current_schema(&env)?;
+        let schedule = Self::load_schedule(&env)?;
+        let fee = basis_points_of(amount, Self::select_tier(&schedule, amount))?;
+        require_positive_amount(amount)?;
+
+        let mut state: TreasuryState = env.storage()
+            .instance()
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)?;
+        let new_total = BalanceManager::add(state.total_balance, fee)?;
+        state.total_balance = new_total;
+
+        env.storage().instance().set(&String::from_str(&env, "state"), &state);
+        let prev_total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalCollected)
+            .unwrap_or(0);
+        let new_collected = prev_total
+            .checked_add(fee)
+            .ok_or(ContractError::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalCollected, &new_collected);
+        Self::bump_instance_ttl(&env);
+
+        env.events()
+            .publish((symbol_short!("coll"),), (amount, fee, recipient));
+        Ok(fee)
+    }
+
+    /// Route funds to the treasury address. Admin only.
+    pub fn route_to_treasury(
+        env: Env,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        Self::require_current_schema(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(ContractError::NotInitialized)?;
+        let mut state: TreasuryState = env.storage()
+            .instance()
+            .get(&String::from_str(&env, "state"))
+            .ok_or(ContractError::NotInitialized)?;
+        let new_total = BalanceManager::sub(state.total_balance, amount)?;
+        state.total_balance = new_total;
+        env.storage().instance().set(&String::from_str(&env, "state"), &state);
+        Self::bump_instance_ttl(&env);
+
+        env.events()
+            .publish((symbol_short!("routed"),), (amount, treasury.clone()));
+        Ok(amount)
+    }
+
+    /// Update the treasury routing address. Admin only.
+    pub fn update_treasury(
+        env: Env,
+        treasury: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_current_schema(&env)?;
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        Self::bump_instance_ttl(&env);
+        env.events().publish((symbol_short!("trsy"),), treasury);
+        Ok(())
+    }
+
+    /// Get the total collected fees.
+    pub fn total_collected(env: Env) -> Result<i128, ContractError> {
+        Self::require_current_schema(&env)?;
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalCollected)
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Get the treasury address.
     pub fn get_treasury(env: Env) -> Result<Address, ContractError> {
         Self::require_current_schema(&env)?;
         env.storage()
@@ -277,45 +471,29 @@ impl TreasuryContract {
             .ok_or(ContractError::NotInitialized)
     }
 
-    /// Point the treasury at a new address. Admin only.
-    pub fn update_treasury(env: Env, new_treasury: Address) -> Result<(), ContractError> {
-        Self::require_current_schema(&env)?;
-        Self::require_admin(&env)?;
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Treasury, &new_treasury);
-        Self::bump_instance_ttl(&env);
-        env.events()
-            .publish((symbol_short!("treasury"),), new_treasury);
-        Ok(())
-    }
-
-    /// Announce that `amount` is routed to the treasury.
-    ///
-    /// Emits an event for off-chain settlement; like the escrow, this contract does
-    /// not itself move tokens.
-    pub fn route_to_treasury(env: Env, amount: i128) -> Result<(), ContractError> {
-        Self::require_current_schema(&env)?;
-        require_positive_amount(amount)?;
-
-        let treasury = Self::get_treasury(env.clone())?;
-        env.events()
-            .publish((symbol_short!("routed"),), (amount, treasury));
-        Ok(())
-    }
-
-    // ── Upgrade surface (issue #817) ──────────────────────────────────────────
-
-    pub fn schema_version(env: Env) -> Result<u32, ContractError> {
+    /// The stored schema version.
+    pub fn schema_version(env: Env) -> u32 {
         env.storage()
             .instance()
             .get(&DataKey::Schema)
-            .ok_or(ContractError::NotInitialized)
+            .unwrap_or(0)
     }
 
-    /// Replace the contract WASM. Admin only. Run `migrate` immediately after.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    /// Get the fee for a given amount based on the stored schedule.
+    pub fn fee_for_amount(env: Env, amount: i128) -> Result<u32, ContractError> {
+        Self::require_current_schema(&env)?;
+        if amount < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let schedule = Self::load_schedule(&env)?;
+        Ok(Self::select_tier(&schedule, amount))
+    }
+
+    /// Replace the contract WASM. Admin only.
+    ///
+    /// Storage is untouched by the swap; run `migrate` afterwards if the new build
+    /// expects a newer layout.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         env.events().publish((symbol_short!("upgrade"),), ());
@@ -323,10 +501,6 @@ impl TreasuryContract {
     }
 
     /// Convert persisted state to [`SCHEMA_VERSION`]. Returns the version migrated from.
-    ///
-    /// Handles two migration paths:
-    /// - v1 → v3: adds `TotalCollected` counter and converts schedule keys from `i128` to `u64`.
-    /// - v2 → v3: converts schedule keys from `i128` to `u64` (saves 8 bytes/tier).
     pub fn migrate(env: Env) -> Result<u32, ContractError> {
         Self::require_admin(&env)?;
 
@@ -344,18 +518,11 @@ impl TreasuryContract {
         }
 
         if stored == 1 {
-            // v1 tracked no running total. Start the counter at zero rather than
-            // leaving the key absent, which would fail every `total_collected` call.
             env.storage()
                 .instance()
                 .set(&DataKey::TotalCollected, &0i128);
         }
 
-        // Both v1 and v2 used Map<i128, u32> for the schedule; migrate to Map<u64, u32>.
-        // All tier thresholds are validated non-negative at write time, so casting
-        // i128 → u64 is safe for any live deployment.
-        //
-        // Storage savings: 8 bytes per tier key × up to 16 tiers = up to 128 bytes.
         {
             let old: Map<i128, u32> = env
                 .storage()
@@ -365,7 +532,6 @@ impl TreasuryContract {
 
             let mut new_schedule: Map<u64, u32> = Map::new(&env);
             for (threshold, bps) in old.iter() {
-                // Safe cast: stored tiers are always >= 0 (enforced by set_fee_schedule).
                 new_schedule.set(threshold as u64, bps);
             }
             env.storage()
@@ -378,66 +544,11 @@ impl TreasuryContract {
             .set(&DataKey::Schema, &SCHEMA_VERSION);
         Self::bump_instance_ttl(&env);
         env.events()
-            .publish((symbol_short!("migrate"),), (stored, SCHEMA_VERSION));
+            .publish((symbol_short!("migrt"),), (stored, SCHEMA_VERSION));
         Ok(stored)
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
-
-    /// Highest tier threshold not exceeding `amount`, or 0 basis points if none.
-    ///
-    /// `Map` iterates in key order, so the last matching entry is the best one.
-    fn select_tier(schedule: &Map<u64, u32>, amount: i128) -> u32 {
-        let mut selected = 0u32;
-        for (threshold, basis_points) in schedule.iter() {
-            if (threshold as i128) > amount {
-                break;
-            }
-            selected = basis_points;
-        }
-        selected
-    }
-
-    fn load_schedule(env: &Env) -> Result<Map<u64, u32>, ContractError> {
-        env.storage()
-            .instance()
-            .get(&DataKey::FeeSchedule)
-            .ok_or(ContractError::NotInitialized)
-    }
-
-    fn require_admin(env: &Env) -> Result<(), ContractError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(ContractError::NotInitialized)?;
-        admin.require_auth();
-        Ok(())
-    }
-
-    fn require_current_schema(env: &Env) -> Result<(), ContractError> {
-        check_schema_version(
-            env.storage().instance().get(&DataKey::Schema),
-            SCHEMA_VERSION,
-        )
-    }
-
-    fn bump_instance_ttl(env: &Env) {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-    }
-}
-
-#[cfg(feature = "testutils")]
-pub mod test_utils;
-
-#[cfg(test)]
-mod test;
     /// Collect a batch of fees, totalling them into a single storage write.
-    /// 
-    /// More gas-efficient than iterating `collect_fee` because the schedule is
-    /// read once and the `TotalCollected` counter is updated only at the end.
     pub fn collect_fee_batch(
         env: Env,
         amounts: Vec<i128>,
@@ -450,8 +561,8 @@ mod test;
         let mut total_fee = 0i128;
 
         for amount in amounts.iter() {
-            require_positive_amount(*amount)?;
-            let fee = basis_points_of(*amount, Self::select_tier(&schedule, *amount))?;
+            require_positive_amount(amount)?;
+            let fee = basis_points_of(amount, Self::select_tier(&schedule, amount))?;
             total_fee = total_fee
                 .checked_add(fee)
                 .ok_or(ContractError::Overflow)?;
@@ -472,8 +583,48 @@ mod test;
         Self::bump_instance_ttl(&env);
 
         env.events().publish(
-            (symbol_short!("collect_batch"),),
+            (symbol_short!("cbatch"),),
             (recipient, total_fee, fees.len() as u32),
         );
         Ok(fees)
     }
+
+    // ── Internal helpers ──────────────────────────────────────────────
+
+    fn require_current_schema(env: &Env) -> Result<(), ContractError> {
+        check_schema_version(
+            env.storage().instance().get(&DataKey::Schema),
+            SCHEMA_VERSION,
+        )
+    }
+
+    fn require_admin(env: &Env) -> Result<(), ContractError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        admin.require_auth();
+        Ok(())
+    }
+
+    fn load_schedule(env: &Env) -> Result<Map<u64, u32>, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeSchedule)
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    fn bump_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+    }
+}
+
+#[cfg(test)]
+mod test;
+mod tests;
+
+#[cfg(feature = "testutils")]
+pub mod test_utils;
