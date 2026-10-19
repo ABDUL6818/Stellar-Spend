@@ -51,7 +51,6 @@ export default defineConfig({
         '**/src/test/fixtures/**',
         '**/src/test/factories/**',
         '**/src/test/test-helpers.ts',
-        '**/__tests__/**',
         '**/tests/**',
         '**/src/test/__snapshots__/**',
         '**/src/test/snapshots/**',
