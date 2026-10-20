@@ -118,6 +118,23 @@ function isMissing(value: string | undefined) {
   return !value || value.trim().length === 0;
 }
 
+export interface EnvValidationResult {
+  missingServerKeys: RequiredServerEnvKey[];
+  missingPublicKeys: RequiredPublicEnvKey[];
+  forbiddenPublicKeys: (typeof forbiddenPublicSecretKeys)[number][];
+}
+
+/**
+ * Collects every environment problem at once instead of failing on the first.
+ */
+export function collectEnvIssues(source: EnvSource = process.env): EnvValidationResult {
+  return {
+    missingServerKeys: requiredServerEnvKeys.filter((key) => isMissing(source[key])),
+    missingPublicKeys: requiredPublicEnvKeys.filter((key) => isMissing(source[key])),
+    forbiddenPublicKeys: forbiddenPublicSecretKeys.filter((key) => !isMissing(source[key])),
+  };
+}
+
 function buildEnvErrorMessage(
   missingServerKeys: string[],
   missingPublicKeys: string[],
@@ -152,9 +169,7 @@ function buildEnvErrorMessage(
  * listing every problem. Returns the typed values on success.
  */
 export function loadEnvConfig(source: EnvSource = process.env): ValidatedEnv {
-  const missingServerKeys = requiredServerEnvKeys.filter((key) => isMissing(source[key]));
-  const missingPublicKeys = requiredPublicEnvKeys.filter((key) => isMissing(source[key]));
-  const forbiddenPublicKeys = forbiddenPublicSecretKeys.filter((key) => !isMissing(source[key]));
+  const { missingServerKeys, missingPublicKeys, forbiddenPublicKeys } = collectEnvIssues(source);
 
   if (
     missingServerKeys.length > 0 ||
@@ -174,4 +189,12 @@ export function loadEnvConfig(source: EnvSource = process.env): ValidatedEnv {
       requiredPublicEnvKeys.map((key) => [key, source[key]!]),
     ) as Record<RequiredPublicEnvKey, string>,
   };
+}
+
+/**
+ * Startup entry helper: validates `process.env` and returns the typed env,
+ * throwing a single aggregated error listing every missing/forbidden key.
+ */
+export function validateEnv(source: EnvSource = process.env): ValidatedEnv {
+  return loadEnvConfig(source);
 }

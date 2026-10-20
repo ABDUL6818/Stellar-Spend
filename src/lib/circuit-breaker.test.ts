@@ -19,6 +19,7 @@ describe('CircuitBreaker (core)', () => {
   let breaker: CircuitBreaker;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     breaker = new CircuitBreaker({ name: 'test', failureThreshold: 2, resetTimeoutMs: 50 });
   });
 
@@ -77,7 +78,6 @@ describe('CircuitBreaker (core)', () => {
 
   describe('OPEN → HALF_OPEN transition', () => {
     it('transitions to HALF_OPEN after resetTimeout elapses', async () => {
-      vi.useFakeTimers();
       const b = new CircuitBreaker({
         name: 'test',
         failureThreshold: 1,
@@ -98,7 +98,6 @@ describe('CircuitBreaker (core)', () => {
     });
 
     it('re-opens on probe failure in HALF_OPEN', async () => {
-      vi.useFakeTimers();
       const b = new CircuitBreaker({
         name: 'test',
         failureThreshold: 1,
@@ -119,7 +118,6 @@ describe('CircuitBreaker (core)', () => {
 
   describe('timeout', () => {
     it('throws CircuitTimeoutError when fn exceeds timeoutMs', async () => {
-      vi.useFakeTimers();
       const b = new CircuitBreaker({ name: 'test', failureThreshold: 10, timeoutMs: 100 });
 
       const slowFn = () =>
@@ -138,6 +136,12 @@ describe('CircuitBreaker (core)', () => {
 // ── Offramp provider breakers (#1206) ────────────────────────────────────────
 
 describe('offramp provider breakers are exported and healthy (#1206)', () => {
+  beforeEach(() => {
+    paycrestBreaker.reset();
+    allbridgeBreaker.reset();
+    sorobanRpcBreaker.reset();
+  });
+
   it('exports a paycrestBreaker', () => {
     expect(paycrestBreaker).toBeInstanceOf(CircuitBreaker);
   });
