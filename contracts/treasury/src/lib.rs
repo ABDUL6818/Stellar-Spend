@@ -71,7 +71,8 @@
 pub mod balance;
 
 use soroban_sdk::{
-    contract, contractimpl, contractmeta, contracttype, symbol_short, Address, Env, Map, String, Vec,
+    contract, contractimpl, contractmeta, contracttype, symbol_short, Address, Env, Map, String,
+    Vec,
 };
 use balance::BalanceManager;
 use stellar_spend_shared::{
@@ -140,7 +141,8 @@ impl TreasuryContract {
         env: Env,
         admin: Address,
     ) -> Result<(), ContractError> {
-        let state: Option<TreasuryState> = env.storage().instance().get(&String::from_str(&env, "state"));
+        let state: Option<TreasuryState> =
+            env.storage().instance().get(&String::from_str(&env, "state"));
         if state.is_some() {
             return Err(ContractError::AlreadyInitialized);
         }
