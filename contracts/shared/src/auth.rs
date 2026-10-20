@@ -59,7 +59,10 @@ impl AdminAuth {
 }
 
 pub fn assert_is_admin(env: &Env, admin: &Address, admin_key: &str) -> Result<(), ContractError> {
-    let stored_admin: Address = env.storage().instance().get(&Symbol::new(env, admin_key))
+    let stored_admin: Address = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, admin_key))
         .ok_or(ContractError::NotFound)?;
     if admin != &stored_admin {
         return Err(ContractError::Unauthorized);
@@ -68,8 +71,15 @@ pub fn assert_is_admin(env: &Env, admin: &Address, admin_key: &str) -> Result<()
     Ok(())
 }
 
-pub fn assert_is_signer(env: &Env, signer: &Address, signers_key: &str) -> Result<(), ContractError> {
-    let signers: Vec<Address> = env.storage().instance().get(&Symbol::new(env, signers_key))
+pub fn assert_is_signer(
+    env: &Env,
+    signer: &Address,
+    signers_key: &str,
+) -> Result<(), ContractError> {
+    let signers: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, signers_key))
         .ok_or(ContractError::NotInitialized)?;
     if !signers.contains(signer) {
         return Err(ContractError::Unauthorized);
